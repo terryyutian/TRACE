@@ -1,0 +1,9 @@
+# Install the package (TRACE) from the repo using pyproject.toml
+.
+
+# Web server for Heroku
+gunicorn
+uvicorn
+
+# Install the spaCy English model during build (so runtime doesn't need downloads)
+en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
