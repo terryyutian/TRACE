@@ -14,7 +14,7 @@ def trace(
     *,
     spacy_model: str = "en_core_web_sm",
     # Step 1
-    min_sent_tokens: int = 5,
+    min_sent_tokens: int = 4,
     theta: float = 0.6,
     delta_len: int = 5,
     strict_increase: bool = True,
