@@ -22,6 +22,7 @@ dependencies = [
   "pandas>=1.0.0",
   "spacy>=3.7,<3.8",
   "fastapi",
+  "gunicorn",
   "uvicorn",
   "jinja2",
 ]
@@ -29,9 +30,14 @@ dependencies = [
 
 [tool.setuptools]
 package-dir = { "" = "src" }
+include-package-data = true
+
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+trace_revision = ["web/**/*"]
 
 
 [tool.ruff]
