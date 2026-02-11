@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>TRACE: Text Revision Analysis via Change Estimation</title>
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="panel left">
+      <div class="brand">
+        <div class="logo">TRACE</div>
+        <div class="title">Text Revision Analysis via Change Estimation</div>
+      </div>
+
+      <div class="card">
+        <h2>About</h2>
+        <p>
+          This is a demo web app for TRACE, an automated approach for multi-granularity analysis
+          of textual revisions between a source text and a target text.
+        </p>
+        <h2>How to use</h2>
+        <ol>
+          <li>Paste your draft into <b>Source Text</b>.</li>
+          <li>Paste your revised version into <b>Target Text</b> (or paste the source and edit).</li>
+          <li>Click <b>Analyze Text Changes</b>.</li>
+        </ol>
+        <p class="muted">
+          Questions? Contact Terry Yu Tian at
+          <a href="mailto:terry.yutian9@gmail.com">terry.yutian9@gmail.com</a>.
+        </p>
+      </div>
+    </aside>
+
+    <main class="panel right">
+      <h1>TRACE: Text Revision Analysis via Change Estimation</h1>
+
+      <div class="stack">
+        <label class="label">Source Text</label>
+        <textarea id="sourceText" class="textarea" placeholder="Put your source text here."></textarea>
+
+        <label class="label">Target Text</label>
+        <textarea id="targetText" class="textarea" placeholder="Put your target text here. You can also paste your source text here and make changes to create your target text."></textarea>
+
+        <button id="analyzeBtn" class="btn primary" type="button">
+          Analyze Text Changes
+        </button>
+
+        <div id="errorBox" class="error" style="display:none;"></div>
+      </div>
+    </main>
+  </div>
+
+  <script src="/assets/app.js"></script>
+</body>
+</html>

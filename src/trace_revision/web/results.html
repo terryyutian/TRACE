@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Results | TRACE</title>
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+  <div class="results-shell">
+    <header class="results-header">
+      <button id="backBtn" class="btn ghost" type="button">← Back</button>
+      <div class="results-title">
+        <div class="kicker">TRACE</div>
+        <div class="headline">Analysis Results</div>
+      </div>
+      <button id="exportBtn" class="btn accent" type="button">Export Results</button>
+    </header>
+
+    <section class="results-content">
+      <div class="card">
+        <h2>Output Table</h2>
+        <div class="table-wrap">
+          <table id="resultsTable" class="table"></table>
+        </div>
+      </div>
+    </section>
+
+    <div id="errorBox" class="error" style="display:none;"></div>
+  </div>
+
+  <script src="/assets/app.js"></script>
+</body>
+</html>
