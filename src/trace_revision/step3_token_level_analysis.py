@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import List, Dict, Literal, Tuple, Optional, Any
 import pandas as pd
 
 from .general import (
     Tok,
     tokenize_with_spans,
-    tokenize_regex,
     normalized_edit_similarity,
     ensure_span_list,
     safe_cell,
@@ -124,16 +122,18 @@ def _merge_adjacent_ops_indexed(
             e = b_toks[cur_b_idx[-1]].end
             tgt_span = [s, e]
 
-        src_text = source[src_span[0]: src_span[1] + 1] if src_span else ""
-        tgt_text = target[tgt_span[0]: tgt_span[1] + 1] if tgt_span else ""
+        src_text = source[src_span[0] : src_span[1] + 1] if src_span else ""
+        tgt_text = target[tgt_span[0] : tgt_span[1] + 1] if tgt_span else ""
 
-        rows.append({
-            "tag": cur_tag,
-            "source_text": src_text,
-            "target_text": tgt_text,
-            "source_span": src_span,
-            "target_span": tgt_span,
-        })
+        rows.append(
+            {
+                "tag": cur_tag,
+                "source_text": src_text,
+                "target_text": tgt_text,
+                "source_span": src_span,
+                "target_span": tgt_span,
+            }
+        )
 
         cur_tag = None
         cur_a_idx = []
@@ -176,6 +176,35 @@ def diff_with_local_spans(source: str, target: str) -> List[Dict[str, Any]]:
 
 
 # ============================================================
+# Helpers for updated Move decomposition
+# ============================================================
+
+def _normalized_move_target_span(
+    source_chunk: Optional[str],
+    target_index: Optional[List[int]],
+) -> Optional[List[int]]:
+    """
+    For the macro 'move' row, represent a pure relocation:
+      - anchor at target_index.start
+      - end = start + len(source_chunk) - 1   (inclusive)
+    If indices/text are missing, fall back to the Step2 target_index as-is.
+    """
+    if not target_index or not isinstance(target_index, list) or len(target_index) != 2:
+        return target_index
+
+    if source_chunk is None:
+        return target_index
+
+    start = int(target_index[0])
+    # len() counts characters; Step2 indices are inclusive.
+    length = len(source_chunk)
+    if length <= 0:
+        return target_index
+
+    return [start, start + length - 1]
+
+
+# ============================================================
 # Step 3 main (public)
 # ============================================================
 
@@ -192,11 +221,22 @@ def step3_fine_grained_revision_analysis(
       Output columns:
         operation_id, operation, source_text, source_index, target_text, target_index
 
-      Replace rule (updated):
-        - If normalized token similarity(src_chunk, tgt_chunk) < threshold:
-            emit one macro 'replace' row (no token-level expansion)
-          else:
-            emit token-level span rows (no macro row)
+    Key behaviors:
+      - Equal:
+          * if no differences: one 'preserve' row covering the whole chunk
+          * if differences: output ALL token-level segments in order (including preserve)
+      - Move (UPDATED, Option A):
+          * emit ONE macro 'move' row encoding pure relocation:
+              source_text = source_chunk
+              target_text = source_chunk  (exactly)
+              target_index = [t_start, t_start + len(source_chunk) - 1]
+          * then, if source_chunk vs observed target_chunk differs:
+              emit token-level spans (including preserve) using actual Step2 bases
+      - Replace (same as your updated rule):
+          * if similarity < threshold: emit one macro 'replace' row
+          * else: emit token-level spans (no macro replace row)
+      - Delete/Insert:
+          * each becomes one row
     """
     required = {"operation", "source_chunk", "source_index", "target_chunk", "target_index"}
     missing = required - set(step2_df.columns)
@@ -206,20 +246,24 @@ def step3_fine_grained_revision_analysis(
     out_rows: List[Dict[str, Any]] = []
     op_id = 1
 
-    def emit(operation: str,
-             s_text: Optional[str],
-             s_idx: Optional[List[int]],
-             t_text: Optional[str],
-             t_idx: Optional[List[int]]) -> None:
+    def emit(
+        operation: str,
+        s_text: Optional[str],
+        s_idx: Optional[List[int]],
+        t_text: Optional[str],
+        t_idx: Optional[List[int]],
+    ) -> None:
         nonlocal op_id
-        out_rows.append({
-            "operation_id": op_id,
-            "operation": operation,
-            "source_text": s_text,
-            "source_index": s_idx,
-            "target_text": t_text,
-            "target_index": t_idx,
-        })
+        out_rows.append(
+            {
+                "operation_id": op_id,
+                "operation": operation,
+                "source_text": s_text,
+                "source_index": s_idx,
+                "target_text": t_text,
+                "target_index": t_idx,
+            }
+        )
         op_id += 1
 
     for _, r in step2_df.iterrows():
@@ -243,14 +287,18 @@ def step3_fine_grained_revision_analysis(
             continue
 
         if op == "Move":
-            emit("move", s_chunk, s_index, t_chunk, t_index)
+            # Layer 1: normalized (pure) move macro row (Option A)
+            norm_t_index = _normalized_move_target_span(s_chunk, t_index)
+            emit("move", s_chunk, s_index, s_chunk, norm_t_index)
 
+            # Layer 2: token-level edits between source_chunk and OBSERVED target_chunk
             diffs = diff_with_local_spans(s_chunk or "", t_chunk or "")
             has_diff = any(d["tag"] != "preserve" for d in diffs)
+
             if has_diff:
                 for d in diffs:
                     emit(
-                        d["tag"],
+                        d["tag"],  # preserve/insert/delete/replace
                         d["source_text"] if d["source_text"] != "" else None,
                         add_span_base(d["source_span"], s_base),
                         d["target_text"] if d["target_text"] != "" else None,
