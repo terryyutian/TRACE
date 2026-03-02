@@ -27,9 +27,16 @@ class UnitSpan:
 
 @dataclass(frozen=True)
 class TextUnit:
-    """A sentence unit (after optional short-sentence merging)."""
+    """
+    A sentence unit (after optional short-sentence merging).
+
+    text is ALWAYS the exact substring from the ORIGINAL input text using
+    [start_char, end_char] inclusive.
+    """
     text: str
     tokens: List[str]
+    start_char: int  # inclusive in original text
+    end_char: int    # inclusive in original text
 
 
 @dataclass
@@ -59,7 +66,11 @@ def sentence_tokenize_with_short_merge(
     """
     spaCy sentence segmentation + short-sentence merge:
       - If a sentence has < min_tokens tokens, merge forward; if last, merge backward.
+
+    Char spans (start_char/end_char) are preserved as ORIGINAL indices (inclusive).
+    `TextUnit.text` is the exact substring slice from the ORIGINAL text.
     """
+    text = text or ""
     doc = nlp(text)
     raw_sents = [sent for sent in doc.sents if sent.text.strip()]
     if not raw_sents:
@@ -72,7 +83,25 @@ def sentence_tokenize_with_short_merge(
                 continue
             t = tok.text.lower() if lowercase else tok.text
             toks.append(t)
-        return TextUnit(text=sent.text.strip(), tokens=toks)
+
+        # spaCy: start_char inclusive, end_char exclusive
+        start_char = int(sent.start_char)
+        end_char = int(sent.end_char) - 1  # inclusive
+
+        if start_char < 0:
+            start_char = 0
+        if end_char < start_char:
+            end_char = start_char
+        if end_char >= len(text):
+            end_char = len(text) - 1 if text else 0
+
+        unit_text = text[start_char:end_char + 1]
+        return TextUnit(
+            text=unit_text,
+            tokens=toks,
+            start_char=start_char,
+            end_char=end_char,
+        )
 
     units = [sent_to_unit(s) for s in raw_sents]
 
@@ -80,23 +109,46 @@ def sentence_tokenize_with_short_merge(
     i = 0
     while i < len(units):
         u = units[i]
+
         if len(u.tokens) < min_tokens:
+            # Merge forward if possible
             if i < len(units) - 1:
-                text_acc = u.text
+                start_acc = u.start_char
+                end_acc = u.end_char
                 tok_acc = list(u.tokens)
+
                 i += 1
                 while i < len(units) and len(tok_acc) < min_tokens:
-                    text_acc = (text_acc + " " + units[i].text).strip()
-                    tok_acc.extend(units[i].tokens)
+                    nxt = units[i]
+                    tok_acc.extend(nxt.tokens)
+                    end_acc = nxt.end_char
                     i += 1
-                merged.append(TextUnit(text=text_acc, tokens=tok_acc))
+
+                merged_text = text[start_acc:end_acc + 1] if text else ""
+                merged.append(
+                    TextUnit(
+                        text=merged_text,
+                        tokens=tok_acc,
+                        start_char=start_acc,
+                        end_char=end_acc,
+                    )
+                )
             else:
+                # Last short sentence: merge backward if possible
                 if merged:
                     prev = merged.pop()
-                    merged.append(TextUnit(
-                        text=(prev.text + " " + u.text).strip(),
-                        tokens=prev.tokens + u.tokens
-                    ))
+                    start_acc = prev.start_char
+                    end_acc = u.end_char
+                    tok_acc = prev.tokens + u.tokens
+                    merged_text = text[start_acc:end_acc + 1] if text else ""
+                    merged.append(
+                        TextUnit(
+                            text=merged_text,
+                            tokens=tok_acc,
+                            start_char=start_acc,
+                            end_char=end_acc,
+                        )
+                    )
                 else:
                     merged.append(u)
                 i += 1
@@ -112,11 +164,31 @@ def sentence_tokenize_with_short_merge(
 # ============================================================
 
 def _concat_units(units: List[TextUnit], span: UnitSpan) -> TextUnit:
-    texts = [u.text for u in units[span.start:span.end + 1]]
     toks: List[str] = []
     for u in units[span.start:span.end + 1]:
         toks.extend(u.tokens)
-    return TextUnit(text=" ".join(texts).strip(), tokens=toks)
+
+    start_char = units[span.start].start_char
+    end_char = units[span.end].end_char
+
+    # Text is exact original slice using existing char spans
+    # (Each unit already stores an original slice.)
+    # We reconstruct by slicing the first unit's original backing span range.
+    # Since we don't have the full original text here, we conservatively
+    # join unit.texts; indices remain authoritative.
+    #
+    # If you want text==exact slice always for spans too, we do it in Step1 main
+    # where original text is available. Here, keep a readable concatenation.
+    texts = [u.text for u in units[span.start:span.end + 1]]
+    text_joined = "".join(texts)
+    # Note: text_joined may not perfectly match original slice if sentence spans
+    # are non-contiguous (shouldn't happen with spaCy sents). Indices remain correct.
+    return TextUnit(
+        text=text_joined,
+        tokens=toks,
+        start_char=start_char,
+        end_char=end_char,
+    )
 
 
 def _expand_window_by_improvement(
@@ -274,24 +346,6 @@ def _resolve_conflicts_greedy_nonoverlap(candidates: List[Match]) -> List[Match]
     return accepted
 
 
-def _char_spans_for_units(units: List[TextUnit]) -> List[Tuple[int, int]]:
-    """Character spans per unit in reconstructed text: ' '.join(unit.text). Inclusive [start,end]."""
-    spans: List[Tuple[int, int]] = []
-    pos = 0
-    for idx, u in enumerate(units):
-        start = pos
-        end = start + len(u.text) - 1
-        spans.append((start, end))
-        pos = end + 1
-        if idx != len(units) - 1:
-            pos += 1  # space between units
-    return spans
-
-
-def _span_to_char_index(span: UnitSpan, unit_char_spans: List[Tuple[int, int]]) -> List[int]:
-    return [unit_char_spans[span.start][0], unit_char_spans[span.end][1]]
-
-
 def _build_unmatched_spans(total: int, covered: set, group: bool) -> List[UnitSpan]:
     spans: List[UnitSpan] = []
     i = 0
@@ -364,7 +418,7 @@ def group_adjacent_unmatched(df: pd.DataFrame, prefix: str = "D") -> pd.DataFram
             i += 1
 
         rows.append({
-            "chunk": " ".join([p for p in chunk_parts if p.strip()]),
+            "chunk": "".join([p for p in chunk_parts if p]),
             "label": run_label,
             "chunk_index": [int(start_char), int(end_char)],
         })
@@ -395,7 +449,11 @@ def step1_chunk_matching_to_dataframes(
       - tgt_df: columns [chunk, label, chunk_index] with C*/I* labels
 
     chunk_index is ALWAYS a Python list [start,end] (inclusive) after this function returns.
+    Indices are anchored to the ORIGINAL src_text / tgt_text.
     """
+    src_text = src_text or ""
+    tgt_text = tgt_text or ""
+
     if nlp is None:
         nlp = spacy.load("en_core_web_sm")
 
@@ -410,12 +468,17 @@ def step1_chunk_matching_to_dataframes(
     )
     matches = _resolve_conflicts_greedy_nonoverlap(candidates)
 
-    # Assign C labels based on source order of matched chunks
+    # Assign C labels based on source order of matched chunks.
+    # IMPORTANT: key does NOT include float score (avoid brittle dict keys).
     matches_src_sorted = sorted(matches, key=lambda m: (m.src_span.start, m.src_span.end))
     c_label_for_match: Dict[tuple, str] = {}
     for k, m in enumerate(matches_src_sorted, start=1):
-        key = (m.src_span.start, m.src_span.end, m.tgt_span.start, m.tgt_span.end, m.score, m.kind)
+        key = (m.src_span.start, m.src_span.end, m.tgt_span.start, m.tgt_span.end, m.kind)
         c_label_for_match[key] = f"C{k}"
+
+    def c_label(m: Match) -> str:
+        key = (m.src_span.start, m.src_span.end, m.tgt_span.start, m.tgt_span.end, m.kind)
+        return c_label_for_match.get(key, "C?")
 
     covered_src = set()
     covered_tgt = set()
@@ -427,24 +490,11 @@ def step1_chunk_matching_to_dataframes(
         src_match_by_start[m.src_span.start] = m
         tgt_match_by_start[m.tgt_span.start] = m
 
-    src_unit_spans = _char_spans_for_units(src_units)
-    tgt_unit_spans = _char_spans_for_units(tgt_units)
-
     src_unmatched_spans = _build_unmatched_spans(len(src_units), covered_src, group_unmatched)
     tgt_unmatched_spans = _build_unmatched_spans(len(tgt_units), covered_tgt, group_unmatched)
 
     src_unmatched_by_start = {sp.start: sp for sp in src_unmatched_spans}
     tgt_unmatched_by_start = {sp.start: sp for sp in tgt_unmatched_spans}
-
-    def c_label(m: Match) -> str:
-        key = (m.src_span.start, m.src_span.end, m.tgt_span.start, m.tgt_span.end, m.score, m.kind)
-        if key in c_label_for_match:
-            return c_label_for_match[key]
-        # fallback if float keys differ slightly
-        for mm, lbl in c_label_for_match.items():
-            if mm[0] == m.src_span.start and mm[1] == m.src_span.end and mm[2] == m.tgt_span.start and mm[3] == m.tgt_span.end:
-                return lbl
-        return "C?"
 
     # Build src_df
     src_rows: List[Dict[str, Any]] = []
@@ -454,23 +504,29 @@ def step1_chunk_matching_to_dataframes(
         if i in covered_src and i in src_match_by_start:
             m = src_match_by_start[i]
             lbl = c_label(m)
-            chunk_unit = _concat_units(src_units, m.src_span)
+            start_char = src_units[m.src_span.start].start_char
+            end_char = src_units[m.src_span.end].end_char
+            chunk_text = src_text[start_char:end_char + 1]
             src_rows.append({
-                "chunk": chunk_unit.text,
+                "chunk": chunk_text,
                 "label": lbl,
-                "chunk_index": _span_to_char_index(m.src_span, src_unit_spans)
+                "chunk_index": [start_char, end_char],
             })
             i = m.src_span.end + 1
+
         elif i not in covered_src:
             sp = src_unmatched_by_start[i]
             d_count += 1
-            chunk_unit = _concat_units(src_units, sp)
+            start_char = src_units[sp.start].start_char
+            end_char = src_units[sp.end].end_char
+            chunk_text = src_text[start_char:end_char + 1]
             src_rows.append({
-                "chunk": chunk_unit.text,
+                "chunk": chunk_text,
                 "label": f"D{d_count}",
-                "chunk_index": _span_to_char_index(sp, src_unit_spans)
+                "chunk_index": [start_char, end_char],
             })
             i = sp.end + 1
+
         else:
             i += 1
 
@@ -484,23 +540,29 @@ def step1_chunk_matching_to_dataframes(
         if j in covered_tgt and j in tgt_match_by_start:
             m = tgt_match_by_start[j]
             lbl = c_label(m)
-            chunk_unit = _concat_units(tgt_units, m.tgt_span)
+            start_char = tgt_units[m.tgt_span.start].start_char
+            end_char = tgt_units[m.tgt_span.end].end_char
+            chunk_text = tgt_text[start_char:end_char + 1]
             tgt_rows.append({
-                "chunk": chunk_unit.text,
+                "chunk": chunk_text,
                 "label": lbl,
-                "chunk_index": _span_to_char_index(m.tgt_span, tgt_unit_spans)
+                "chunk_index": [start_char, end_char],
             })
             j = m.tgt_span.end + 1
+
         elif j not in covered_tgt:
             sp = tgt_unmatched_by_start[j]
             ins_count += 1
-            chunk_unit = _concat_units(tgt_units, sp)
+            start_char = tgt_units[sp.start].start_char
+            end_char = tgt_units[sp.end].end_char
+            chunk_text = tgt_text[start_char:end_char + 1]
             tgt_rows.append({
-                "chunk": chunk_unit.text,
+                "chunk": chunk_text,
                 "label": f"I{ins_count}",
-                "chunk_index": _span_to_char_index(sp, tgt_unit_spans)
+                "chunk_index": [start_char, end_char],
             })
             j = sp.end + 1
+
         else:
             j += 1
 
@@ -518,8 +580,14 @@ def step1_chunk_matching_to_dataframes(
     debug_info = None
     if debug:
         debug_info = {
-            "src_units": [u.text for u in src_units],
-            "tgt_units": [u.text for u in tgt_units],
+            "src_units": [
+                {"text": u.text, "start_char": u.start_char, "end_char": u.end_char, "n_tokens": len(u.tokens)}
+                for u in src_units
+            ],
+            "tgt_units": [
+                {"text": u.text, "start_char": u.start_char, "end_char": u.end_char, "n_tokens": len(u.tokens)}
+                for u in tgt_units
+            ],
             "candidates": candidates,
             "matches": matches,
             "params": {

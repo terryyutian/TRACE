@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, List
 import pandas as pd
 
 from .step1_chunk_matching import step1_chunk_matching_to_dataframes, build_spacy_nlp
@@ -24,10 +24,11 @@ def trace(
     replace_similarity_threshold: float = 0.4,
     # Debug
     debug: bool = False,
-) -> Tuple[pd.DataFrame, Optional[Dict[str, Any]]]:
+) -> Tuple[pd.DataFrame, List[Dict[str, Any]], Optional[Dict[str, Any]]]:
     """
     Run TRACE end-to-end and return:
       - step3_df (final mixed-granularity revision representation)
+      - step3_dict (list of row dictionaries; same content as step3_df)
       - debug_info (optional)
     """
     nlp = build_spacy_nlp(spacy_model)
@@ -52,6 +53,8 @@ def trace(
         replace_similarity_threshold=replace_similarity_threshold,
     )
 
+    step3_dict = step3_df.to_dict(orient="records")
+
     debug_info = None
     if debug:
         debug_info = {
@@ -71,4 +74,4 @@ def trace(
             },
         }
 
-    return step3_df, debug_info
+    return step3_df, step3_dict, debug_info

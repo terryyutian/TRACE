@@ -99,42 +99,98 @@ def safe_cell(v: Any) -> Any:
     """
     Safe getter for pandas cells:
       - None stays None
-      - float NaN -> None
-      - lists/tuples/objects are returned as-is (no pd.isna on list!)
+      - pandas/NumPy missing values -> None
+      - lists/tuples/dicts are returned as-is (avoid pd.isna(list) ambiguity)
     """
     if v is None:
         return None
-    if isinstance(v, float) and pd.isna(v):
-        return None
+
+    # Avoid pd.isna on containers (it can return arrays / raise ambiguity)
+    if isinstance(v, (list, tuple, dict)):
+        return v
+
+    try:
+        if pd.isna(v):
+            return None
+    except Exception:
+        pass
+
     return v
 
+
+_SPAN_STR_RE = re.compile(
+    r"^\s*[\[\(\{]?\s*(-?\d+)\s*[,:\-\s]\s*(-?\d+)\s*[\]\)\}]?\s*$"
+)
 
 def ensure_span_list(x: Any) -> Optional[List[int]]:
     """
     Enforce Python list span format: [start, end] (ints) or None.
 
     Accepts:
-      - None / NaN -> None
+      - None / NaN / pd.NA -> None
       - list/tuple len 2 -> [int, int]
-      - numpy array / other sequence-likes len 2 -> [int, int]
+      - numpy array / sequence-like len 2 -> [int, int]
+      - string forms: "[12, 34]", "(12,34)", "12,34", "12 34", "12-34", "12:34"
+
+    Rejects:
+      - arbitrary strings (e.g., "12" will NOT become [1,2])
+      - spans with invalid order or negative indices
     """
     x = safe_cell(x)
     if x is None:
         return None
 
-    if isinstance(x, (list, tuple)):
-        if len(x) == 2:
-            return [int(x[0]), int(x[1])]
-        raise ValueError(f"Invalid span (expected length 2): {x!r}")
+    # --- Handle strings explicitly (do NOT treat as iterable) ---
+    if isinstance(x, (str, bytes)):
+        s = x.decode("utf-8", errors="ignore") if isinstance(x, bytes) else x
+        s = s.strip()
+        if s == "" or s.lower() in {"none", "nan", "null"}:
+            return None
 
+        m = _SPAN_STR_RE.match(s)
+        if not m:
+            raise ValueError(f"Invalid span string (expected '[start,end]' or 'start,end'): {x!r}")
+
+        start = int(m.group(1))
+        end = int(m.group(2))
+
+        if start < 0 or end < 0:
+            raise ValueError(f"Invalid span (negative indices): {x!r}")
+        if start > end:
+            raise ValueError(f"Invalid span (start > end): {x!r}")
+
+        return [start, end]
+
+    # --- Normal list/tuple case ---
+    if isinstance(x, (list, tuple)):
+        if len(x) != 2:
+            raise ValueError(f"Invalid span (expected length 2): {x!r}")
+        start, end = int(x[0]), int(x[1])
+
+        if start < 0 or end < 0:
+            raise ValueError(f"Invalid span (negative indices): {x!r}")
+        if start > end:
+            raise ValueError(f"Invalid span (start > end): {x!r}")
+
+        return [start, end]
+
+    # --- Other sequence-likes (e.g., numpy arrays) ---
     try:
         xs = list(x)
-        if len(xs) == 2:
-            return [int(xs[0]), int(xs[1])]
-    except Exception:
-        pass
+    except Exception as e:
+        raise ValueError(f"Invalid span format (expected [start,end] or None): {x!r}") from e
 
-    raise ValueError(f"Invalid span format (expected [start,end] or None): {x!r}")
+    if len(xs) != 2:
+        raise ValueError(f"Invalid span (expected length 2): {x!r}")
+
+    start, end = int(xs[0]), int(xs[1])
+
+    if start < 0 or end < 0:
+        raise ValueError(f"Invalid span (negative indices): {x!r}")
+    if start > end:
+        raise ValueError(f"Invalid span (start > end): {x!r}")
+
+    return [start, end]
 
 
 def span_base(span: Optional[List[int]]) -> Optional[int]:

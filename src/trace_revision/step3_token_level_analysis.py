@@ -216,29 +216,22 @@ def step3_fine_grained_revision_analysis(
     """
     Step 3 pipeline:
       Input: Step2 operation df with:
-        id, operation, source_chunk, source_index, target_chunk, target_index, ...
+        id, operation,
+        source_label, source_chunk, source_index,
+        target_label, target_chunk, target_index, ...
 
-      Output columns:
-        operation_id, operation, source_text, source_index, target_text, target_index
-
-    Key behaviors:
-      - Equal:
-          * if no differences: one 'preserve' row covering the whole chunk
-          * if differences: output ALL token-level segments in order (including preserve)
-      - Move (UPDATED, Option A):
-          * emit ONE macro 'move' row encoding pure relocation:
-              source_text = source_chunk
-              target_text = source_chunk  (exactly)
-              target_index = [t_start, t_start + len(source_chunk) - 1]
-          * then, if source_chunk vs observed target_chunk differs:
-              emit token-level spans (including preserve) using actual Step2 bases
-      - Replace (same as your updated rule):
-          * if similarity < threshold: emit one macro 'replace' row
-          * else: emit token-level spans (no macro replace row)
-      - Delete/Insert:
-          * each becomes one row
+      Output columns (fixed order):
+        "operation_id", "operation",
+        "source_chunk_label", "source_chunk", "source_chunk_index",
+        "source", "source_index",
+        "target_chunk_label", "target_chunk", "target_chunk_index",
+        "target", "target_index"
     """
-    required = {"operation", "source_chunk", "source_index", "target_chunk", "target_index"}
+    required = {
+        "operation",
+        "source_label", "source_chunk", "source_index",
+        "target_label", "target_chunk", "target_index",
+    }
     missing = required - set(step2_df.columns)
     if missing:
         raise ValueError(f"step2_df missing required columns: {sorted(missing)}")
@@ -247,21 +240,36 @@ def step3_fine_grained_revision_analysis(
     op_id = 1
 
     def emit(
+        *,
         operation: str,
-        s_text: Optional[str],
-        s_idx: Optional[List[int]],
-        t_text: Optional[str],
-        t_idx: Optional[List[int]],
+        # chunk-level context (from Step2)
+        source_chunk_label: Optional[str],
+        source_chunk: Optional[str],
+        source_chunk_index: Optional[List[int]],
+        target_chunk_label: Optional[str],
+        target_chunk: Optional[str],
+        target_chunk_index: Optional[List[int]],
+        # fine-grained fields (this row)
+        source: Optional[str],
+        source_index: Optional[List[int]],
+        target: Optional[str],
+        target_index: Optional[List[int]],
     ) -> None:
         nonlocal op_id
         out_rows.append(
             {
                 "operation_id": op_id,
                 "operation": operation,
-                "source_text": s_text,
-                "source_index": s_idx,
-                "target_text": t_text,
-                "target_index": t_idx,
+                "source_chunk_label": source_chunk_label,
+                "source_chunk": source_chunk,
+                "source_chunk_index": source_chunk_index,
+                "source": source,
+                "source_index": source_index,
+                "target_chunk_label": target_chunk_label,
+                "target_chunk": target_chunk,
+                "target_chunk_index": target_chunk_index,
+                "target": target,
+                "target_index": target_index,
             }
         )
         op_id += 1
@@ -269,27 +277,69 @@ def step3_fine_grained_revision_analysis(
     for _, r in step2_df.iterrows():
         op = str(r["operation"])
 
+        # ---- chunk-level context from Step2 (copied to every Step3 row) ----
+        s_lab = safe_cell(r["source_label"])
+        t_lab = safe_cell(r["target_label"])
+
         s_chunk = safe_cell(r["source_chunk"])
         t_chunk = safe_cell(r["target_chunk"])
 
-        s_index = ensure_span_list(safe_cell(r["source_index"]))
-        t_index = ensure_span_list(safe_cell(r["target_index"]))
+        s_chunk_index = ensure_span_list(safe_cell(r["source_index"]))
+        t_chunk_index = ensure_span_list(safe_cell(r["target_index"]))
 
-        s_base = span_base(s_index)
-        t_base = span_base(t_index)
+        # Bases used for local->global shifting of token spans
+        s_base = span_base(s_chunk_index)
+        t_base = span_base(t_chunk_index)
 
         if op == "Delete":
-            emit("delete", s_chunk, s_index, None, None)
+            emit(
+                operation="delete",
+                source_chunk_label=s_lab,
+                source_chunk=s_chunk,
+                source_chunk_index=s_chunk_index,
+                target_chunk_label=None,
+                target_chunk=None,
+                target_chunk_index=None,
+                source=s_chunk,
+                source_index=s_chunk_index,
+                target=None,
+                target_index=None,
+            )
             continue
 
         if op == "Insert":
-            emit("insert", None, None, t_chunk, t_index)
+            emit(
+                operation="insert",
+                source_chunk_label=None,
+                source_chunk=None,
+                source_chunk_index=None,
+                target_chunk_label=t_lab,
+                target_chunk=t_chunk,
+                target_chunk_index=t_chunk_index,
+                source=None,
+                source_index=None,
+                target=t_chunk,
+                target_index=t_chunk_index,
+            )
             continue
 
         if op == "Move":
             # Layer 1: normalized (pure) move macro row (Option A)
-            norm_t_index = _normalized_move_target_span(s_chunk, t_index)
-            emit("move", s_chunk, s_index, s_chunk, norm_t_index)
+            norm_t_index = _normalized_move_target_span(s_chunk, t_chunk_index)
+
+            emit(
+                operation="move",
+                source_chunk_label=s_lab,
+                source_chunk=s_chunk,
+                source_chunk_index=s_chunk_index,
+                target_chunk_label=t_lab,
+                target_chunk=t_chunk,
+                target_chunk_index=t_chunk_index,
+                source=s_chunk,
+                source_index=s_chunk_index,
+                target=s_chunk,            # exact same as source_chunk
+                target_index=norm_t_index, # normalized span
+            )
 
             # Layer 2: token-level edits between source_chunk and OBSERVED target_chunk
             diffs = diff_with_local_spans(s_chunk or "", t_chunk or "")
@@ -298,11 +348,17 @@ def step3_fine_grained_revision_analysis(
             if has_diff:
                 for d in diffs:
                     emit(
-                        d["tag"],  # preserve/insert/delete/replace
-                        d["source_text"] if d["source_text"] != "" else None,
-                        add_span_base(d["source_span"], s_base),
-                        d["target_text"] if d["target_text"] != "" else None,
-                        add_span_base(d["target_span"], t_base),
+                        operation=d["tag"],  # preserve/insert/delete/replace
+                        source_chunk_label=s_lab,
+                        source_chunk=s_chunk,
+                        source_chunk_index=s_chunk_index,
+                        target_chunk_label=t_lab,
+                        target_chunk=t_chunk,
+                        target_chunk_index=t_chunk_index,
+                        source=d["source_text"] if d["source_text"] != "" else None,
+                        source_index=add_span_base(d["source_span"], s_base),
+                        target=d["target_text"] if d["target_text"] != "" else None,
+                        target_index=add_span_base(d["target_span"], t_base),
                     )
             continue
 
@@ -311,15 +367,33 @@ def step3_fine_grained_revision_analysis(
             has_diff = any(d["tag"] != "preserve" for d in diffs)
 
             if not has_diff:
-                emit("preserve", s_chunk, s_index, t_chunk, t_index)
+                emit(
+                    operation="preserve",
+                    source_chunk_label=s_lab,
+                    source_chunk=s_chunk,
+                    source_chunk_index=s_chunk_index,
+                    target_chunk_label=t_lab,
+                    target_chunk=t_chunk,
+                    target_chunk_index=t_chunk_index,
+                    source=s_chunk,
+                    source_index=s_chunk_index,
+                    target=t_chunk,
+                    target_index=t_chunk_index,
+                )
             else:
                 for d in diffs:
                     emit(
-                        d["tag"],
-                        d["source_text"] if d["source_text"] != "" else None,
-                        add_span_base(d["source_span"], s_base),
-                        d["target_text"] if d["target_text"] != "" else None,
-                        add_span_base(d["target_span"], t_base),
+                        operation=d["tag"],
+                        source_chunk_label=s_lab,
+                        source_chunk=s_chunk,
+                        source_chunk_index=s_chunk_index,
+                        target_chunk_label=t_lab,
+                        target_chunk=t_chunk,
+                        target_chunk_index=t_chunk_index,
+                        source=d["source_text"] if d["source_text"] != "" else None,
+                        source_index=add_span_base(d["source_span"], s_base),
+                        target=d["target_text"] if d["target_text"] != "" else None,
+                        target_index=add_span_base(d["target_span"], t_base),
                     )
             continue
 
@@ -328,21 +402,51 @@ def step3_fine_grained_revision_analysis(
 
             # If too different, represent as ONE macro replace row
             if sim < replace_similarity_threshold:
-                emit("replace", s_chunk, s_index, t_chunk, t_index)
+                emit(
+                    operation="replace",
+                    source_chunk_label=s_lab,
+                    source_chunk=s_chunk,
+                    source_chunk_index=s_chunk_index,
+                    target_chunk_label=t_lab,
+                    target_chunk=t_chunk,
+                    target_chunk_index=t_chunk_index,
+                    source=s_chunk,
+                    source_index=s_chunk_index,
+                    target=t_chunk,
+                    target_index=t_chunk_index,
+                )
                 continue
 
             # Otherwise expand token-level rows (no macro row)
             diffs = diff_with_local_spans(s_chunk or "", t_chunk or "")
             if not diffs:
-                emit("preserve", s_chunk, s_index, t_chunk, t_index)
+                emit(
+                    operation="preserve",
+                    source_chunk_label=s_lab,
+                    source_chunk=s_chunk,
+                    source_chunk_index=s_chunk_index,
+                    target_chunk_label=t_lab,
+                    target_chunk=t_chunk,
+                    target_chunk_index=t_chunk_index,
+                    source=s_chunk,
+                    source_index=s_chunk_index,
+                    target=t_chunk,
+                    target_index=t_chunk_index,
+                )
             else:
                 for d in diffs:
                     emit(
-                        d["tag"],
-                        d["source_text"] if d["source_text"] != "" else None,
-                        add_span_base(d["source_span"], s_base),
-                        d["target_text"] if d["target_text"] != "" else None,
-                        add_span_base(d["target_span"], t_base),
+                        operation=d["tag"],
+                        source_chunk_label=s_lab,
+                        source_chunk=s_chunk,
+                        source_chunk_index=s_chunk_index,
+                        target_chunk_label=t_lab,
+                        target_chunk=t_chunk,
+                        target_chunk_index=t_chunk_index,
+                        source=d["source_text"] if d["source_text"] != "" else None,
+                        source_index=add_span_base(d["source_span"], s_base),
+                        target=d["target_text"] if d["target_text"] != "" else None,
+                        target_index=add_span_base(d["target_span"], t_base),
                     )
             continue
 
@@ -350,5 +454,11 @@ def step3_fine_grained_revision_analysis(
 
     return pd.DataFrame(
         out_rows,
-        columns=["operation_id", "operation", "source_text", "source_index", "target_text", "target_index"],
+        columns=[
+            "operation_id", "operation",
+            "source_chunk_label", "source_chunk", "source_chunk_index",
+            "source", "source_index",
+            "target_chunk_label", "target_chunk", "target_chunk_index",
+            "target", "target_index",
+        ],
     )
