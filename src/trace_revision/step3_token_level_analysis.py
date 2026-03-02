@@ -214,18 +214,17 @@ def step3_fine_grained_revision_analysis(
     replace_similarity_threshold: float = 0.4,
 ) -> pd.DataFrame:
     """
-    Step 3 pipeline:
-      Input: Step2 operation df with:
-        id, operation,
-        source_label, source_chunk, source_index,
-        target_label, target_chunk, target_index, ...
+    Step 3 pipeline (revised output schema):
 
-      Output columns (fixed order):
-        "operation_id", "operation",
-        "source_chunk_label", "source_chunk", "source_chunk_index",
-        "source", "source_index",
-        "target_chunk_label", "target_chunk", "target_chunk_index",
-        "target", "target_index"
+    Input: Step2 operation df with columns:
+      id, operation,
+      source_label, source_chunk, source_index,
+      target_label, target_chunk, target_index
+
+    Output columns (fixed order):
+      "operation_id", "operation", "chunk_label",
+      "source_chunk", "source_chunk_index", "source", "source_index",
+      "target_chunk", "target_chunk_index", "target", "target_index"
     """
     required = {
         "operation",
@@ -239,14 +238,23 @@ def step3_fine_grained_revision_analysis(
     out_rows: List[Dict[str, Any]] = []
     op_id = 1
 
+    def pick_chunk_label(src_lab: Optional[str], tgt_lab: Optional[str]) -> Optional[str]:
+        """
+        Unify labels into one field:
+          - Prefer src_lab if present; else use tgt_lab.
+          - (For C labels they should be identical; if not, we still pick src_lab.)
+        """
+        if src_lab is not None:
+            return src_lab
+        return tgt_lab
+
     def emit(
         *,
         operation: str,
+        chunk_label: Optional[str],
         # chunk-level context (from Step2)
-        source_chunk_label: Optional[str],
         source_chunk: Optional[str],
         source_chunk_index: Optional[List[int]],
-        target_chunk_label: Optional[str],
         target_chunk: Optional[str],
         target_chunk_index: Optional[List[int]],
         # fine-grained fields (this row)
@@ -260,12 +268,11 @@ def step3_fine_grained_revision_analysis(
             {
                 "operation_id": op_id,
                 "operation": operation,
-                "source_chunk_label": source_chunk_label,
+                "chunk_label": chunk_label,
                 "source_chunk": source_chunk,
                 "source_chunk_index": source_chunk_index,
                 "source": source,
                 "source_index": source_index,
-                "target_chunk_label": target_chunk_label,
                 "target_chunk": target_chunk,
                 "target_chunk_index": target_chunk_index,
                 "target": target,
@@ -277,29 +284,28 @@ def step3_fine_grained_revision_analysis(
     for _, r in step2_df.iterrows():
         op = str(r["operation"])
 
-        # ---- chunk-level context from Step2 (copied to every Step3 row) ----
-        s_lab = safe_cell(r["source_label"])
-        t_lab = safe_cell(r["target_label"])
+        # ---- Step2 chunk-level fields ----
+        src_lab = safe_cell(r["source_label"])
+        tgt_lab = safe_cell(r["target_label"])
+        chunk_label = pick_chunk_label(src_lab, tgt_lab)
 
         s_chunk = safe_cell(r["source_chunk"])
         t_chunk = safe_cell(r["target_chunk"])
-
         s_chunk_index = ensure_span_list(safe_cell(r["source_index"]))
         t_chunk_index = ensure_span_list(safe_cell(r["target_index"]))
 
-        # Bases used for local->global shifting of token spans
+        # Bases for local->global shifting
         s_base = span_base(s_chunk_index)
         t_base = span_base(t_chunk_index)
 
         if op == "Delete":
             emit(
                 operation="delete",
-                source_chunk_label=s_lab,
+                chunk_label=chunk_label,  # typically D*
                 source_chunk=s_chunk,
                 source_chunk_index=s_chunk_index,
-                target_chunk_label=None,
-                target_chunk=None,
-                target_chunk_index=None,
+                target_chunk=t_chunk,                 # usually None, but safe to carry if present
+                target_chunk_index=t_chunk_index,     # usually None
                 source=s_chunk,
                 source_index=s_chunk_index,
                 target=None,
@@ -310,10 +316,9 @@ def step3_fine_grained_revision_analysis(
         if op == "Insert":
             emit(
                 operation="insert",
-                source_chunk_label=None,
-                source_chunk=None,
-                source_chunk_index=None,
-                target_chunk_label=t_lab,
+                chunk_label=chunk_label,  # typically I*
+                source_chunk=s_chunk,                 # usually None
+                source_chunk_index=s_chunk_index,     # usually None
                 target_chunk=t_chunk,
                 target_chunk_index=t_chunk_index,
                 source=None,
@@ -324,20 +329,18 @@ def step3_fine_grained_revision_analysis(
             continue
 
         if op == "Move":
-            # Layer 1: normalized (pure) move macro row (Option A)
+            # Layer 1: normalized (pure) move macro row
             norm_t_index = _normalized_move_target_span(s_chunk, t_chunk_index)
-
             emit(
                 operation="move",
-                source_chunk_label=s_lab,
+                chunk_label=chunk_label,  # typically C*
                 source_chunk=s_chunk,
                 source_chunk_index=s_chunk_index,
-                target_chunk_label=t_lab,
                 target_chunk=t_chunk,
                 target_chunk_index=t_chunk_index,
                 source=s_chunk,
                 source_index=s_chunk_index,
-                target=s_chunk,            # exact same as source_chunk
+                target=s_chunk,            # pure relocation: target text equals source chunk
                 target_index=norm_t_index, # normalized span
             )
 
@@ -349,10 +352,9 @@ def step3_fine_grained_revision_analysis(
                 for d in diffs:
                     emit(
                         operation=d["tag"],  # preserve/insert/delete/replace
-                        source_chunk_label=s_lab,
+                        chunk_label=chunk_label,
                         source_chunk=s_chunk,
                         source_chunk_index=s_chunk_index,
-                        target_chunk_label=t_lab,
                         target_chunk=t_chunk,
                         target_chunk_index=t_chunk_index,
                         source=d["source_text"] if d["source_text"] != "" else None,
@@ -369,10 +371,9 @@ def step3_fine_grained_revision_analysis(
             if not has_diff:
                 emit(
                     operation="preserve",
-                    source_chunk_label=s_lab,
+                    chunk_label=chunk_label,
                     source_chunk=s_chunk,
                     source_chunk_index=s_chunk_index,
-                    target_chunk_label=t_lab,
                     target_chunk=t_chunk,
                     target_chunk_index=t_chunk_index,
                     source=s_chunk,
@@ -384,10 +385,9 @@ def step3_fine_grained_revision_analysis(
                 for d in diffs:
                     emit(
                         operation=d["tag"],
-                        source_chunk_label=s_lab,
+                        chunk_label=chunk_label,
                         source_chunk=s_chunk,
                         source_chunk_index=s_chunk_index,
-                        target_chunk_label=t_lab,
                         target_chunk=t_chunk,
                         target_chunk_index=t_chunk_index,
                         source=d["source_text"] if d["source_text"] != "" else None,
@@ -404,10 +404,9 @@ def step3_fine_grained_revision_analysis(
             if sim < replace_similarity_threshold:
                 emit(
                     operation="replace",
-                    source_chunk_label=s_lab,
+                    chunk_label=chunk_label,
                     source_chunk=s_chunk,
                     source_chunk_index=s_chunk_index,
-                    target_chunk_label=t_lab,
                     target_chunk=t_chunk,
                     target_chunk_index=t_chunk_index,
                     source=s_chunk,
@@ -422,10 +421,9 @@ def step3_fine_grained_revision_analysis(
             if not diffs:
                 emit(
                     operation="preserve",
-                    source_chunk_label=s_lab,
+                    chunk_label=chunk_label,
                     source_chunk=s_chunk,
                     source_chunk_index=s_chunk_index,
-                    target_chunk_label=t_lab,
                     target_chunk=t_chunk,
                     target_chunk_index=t_chunk_index,
                     source=s_chunk,
@@ -437,10 +435,9 @@ def step3_fine_grained_revision_analysis(
                 for d in diffs:
                     emit(
                         operation=d["tag"],
-                        source_chunk_label=s_lab,
+                        chunk_label=chunk_label,
                         source_chunk=s_chunk,
                         source_chunk_index=s_chunk_index,
-                        target_chunk_label=t_lab,
                         target_chunk=t_chunk,
                         target_chunk_index=t_chunk_index,
                         source=d["source_text"] if d["source_text"] != "" else None,
@@ -455,10 +452,8 @@ def step3_fine_grained_revision_analysis(
     return pd.DataFrame(
         out_rows,
         columns=[
-            "operation_id", "operation",
-            "source_chunk_label", "source_chunk", "source_chunk_index",
-            "source", "source_index",
-            "target_chunk_label", "target_chunk", "target_chunk_index",
-            "target", "target_index",
+            "operation_id", "operation", "chunk_label",
+            "source_chunk", "source_chunk_index", "source", "source_index",
+            "target_chunk", "target_chunk_index", "target", "target_index",
         ],
     )

@@ -57,14 +57,22 @@ def favicon() -> Response:
 
 @app.post("/api/analyze")
 def api_analyze(req: AnalyzeRequest) -> JSONResponse:
-    df, _ = trace(
+    df, _rows_dict, _dbg = trace(
         req.source_text,
         req.target_text,
         replace_similarity_threshold=req.replace_similarity_threshold or 0.4,
         debug=False,
     )
-    rows: List[Dict[str, Any]] = df.fillna("").to_dict(orient="records")
-    return JSONResponse({"rows": rows})
+
+    cols = ["operation_id", "operation", "source", "source_index", "target", "target_index"]
+
+    # Ensure columns exist (defensive), then project + fill nulls for JSON
+    for c in cols:
+        if c not in df.columns:
+            df[c] = None
+
+    out = df[cols].fillna("").to_dict(orient="records")
+    return JSONResponse({"rows": out})
 
 
 @app.post("/api/export")
