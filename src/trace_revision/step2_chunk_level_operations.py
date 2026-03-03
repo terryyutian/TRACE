@@ -122,6 +122,15 @@ def posthoc_compact_replace(op_df: pd.DataFrame) -> pd.DataFrame:
       - A "Delete" followed immediately by an "Insert" (Delete -> Insert only)
       - No other operations in between
       - Do NOT treat Insert->Delete as Replace
+
+    Label policy (NEW):
+      - Replace rows are relabeled as R1, R2, ... (set on BOTH source_label and target_label)
+      - Remaining Delete rows are relabeled D1, D2, ...
+      - Remaining Insert rows are relabeled I1, I2, ...
+      - C labels (for Equal/Move) are preserved unchanged
+
+    This removes the confusing "Replace rows still labeled D*" issue and makes
+    D/I indices refer only to non-replace deletes/inserts.
     """
     required = [
         "id", "operation",
@@ -135,13 +144,14 @@ def posthoc_compact_replace(op_df: pd.DataFrame) -> pd.DataFrame:
     op_df = _normalize_op_df(op_df)
     rows = op_df.to_dict(orient="records")
 
-    out_rows: List[Dict[str, Any]] = []
+    # ---- 1) Compact Delete->Insert into Replace ----
+    compacted: List[Dict[str, Any]] = []
     i = 0
     while i < len(rows):
         cur = rows[i]
         if cur["operation"] == "Delete" and i + 1 < len(rows) and rows[i + 1]["operation"] == "Insert":
             nxt = rows[i + 1]
-            out_rows.append({
+            compacted.append({
                 "id": None,
                 "operation": "Replace",
                 "source_label": cur["source_label"],
@@ -153,15 +163,69 @@ def posthoc_compact_replace(op_df: pd.DataFrame) -> pd.DataFrame:
             })
             i += 2
         else:
-            out_rows.append(cur)
+            compacted.append(cur)
             i += 1
 
-    for new_id, r in enumerate(out_rows, start=1):
+    # ---- 2) Renumber IDs (stable) ----
+    for new_id, r in enumerate(compacted, start=1):
         r["id"] = new_id
 
-    out_df = pd.DataFrame(out_rows, columns=required)
-    return _normalize_op_df(out_df)
+    out_df = pd.DataFrame(compacted, columns=required)
+    out_df = _normalize_op_df(out_df)
 
+    # ---- 3) Relabel Replace/Delete/Insert operations ----
+    # Preserve C labels for Equal/Move. Only rewrite D/I/R labels.
+    d_count = 0
+    i_count = 0
+    r_count = 0
+
+    def is_c(lbl: Any) -> bool:
+        return isinstance(lbl, str) and lbl.startswith("C")
+
+    new_source_labels: List[Optional[str]] = []
+    new_target_labels: List[Optional[str]] = []
+
+    for _, row in out_df.iterrows():
+        op = row["operation"]
+
+        s_lab = safe_cell(row["source_label"])
+        t_lab = safe_cell(row["target_label"])
+
+        if op == "Replace":
+            r_count += 1
+            r_lab = f"R{r_count}"
+            new_source_labels.append(r_lab)
+            new_target_labels.append(r_lab)
+
+        elif op == "Delete":
+            d_count += 1
+            # If Delete row had a C label (shouldn't), preserve it; otherwise Dk
+            if is_c(s_lab):
+                new_source_labels.append(s_lab)
+            else:
+                new_source_labels.append(f"D{d_count}")
+            # target side is None for Delete
+            new_target_labels.append(None)
+
+        elif op == "Insert":
+            i_count += 1
+            # If Insert row had a C label (shouldn't), preserve it; otherwise Ik
+            if is_c(t_lab):
+                new_target_labels.append(t_lab)
+            else:
+                new_target_labels.append(f"I{i_count}")
+            # source side is None for Insert
+            new_source_labels.append(None)
+
+        else:
+            # Equal / Move (and any future ops): preserve labels
+            new_source_labels.append(s_lab)
+            new_target_labels.append(t_lab)
+
+    out_df["source_label"] = new_source_labels
+    out_df["target_label"] = new_target_labels
+
+    return _normalize_op_df(out_df)
 
 # ============================================================
 # Step 2 main (public)

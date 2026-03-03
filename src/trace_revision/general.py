@@ -6,8 +6,8 @@ from typing import Any, List, Optional
 
 import pandas as pd
 
-# Shared regex tokenizer (words w/ apostrophes + punctuation as tokens)
-TOKEN_RE = re.compile(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)*|[^\w\s]")
+# Shared regex tokenizer (words w/ apostrophes + punctuation + \n as tokens)
+TOKEN_RE = re.compile(r"\n|[A-Za-z0-9]+(?:'[A-Za-z0-9]+)*|[^\w\s]")
 
 
 # ============================================================
