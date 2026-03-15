@@ -457,3 +457,278 @@ def step3_fine_grained_revision_analysis(
             "target_chunk", "target_chunk_index", "target", "target_index",
         ],
     )
+
+
+# ============================================================
+# Step 3 post-hoc readability refinement
+#   - merge adjacent MOVE macro rows by SOURCE sentence adjacency only
+#   - optionally merge adjacent PRESERVE rows by sentence adjacency (both src+tgt)
+# ============================================================
+
+
+def _tspan(x: Any) -> Optional[Tuple[int, int]]:
+    x = ensure_span_list(safe_cell(x))
+    if x is None:
+        return None
+    return (int(x[0]), int(x[1]))
+
+
+def refine_step3_merge_adjacent_sentence_units(
+    step3_df: pd.DataFrame,
+    *,
+    src_sentence_spans: List[Tuple[int, int]],
+    tgt_sentence_spans: List[Tuple[int, int]],
+    merge_preserve: bool = True,
+) -> pd.DataFrame:
+    """
+    Readability refinement on Step3 output.
+
+    MOVE merging (SOURCE adjacency only):
+      - Merge adjacent MOVE *macro* rows when their source_chunk_index spans are consecutive
+        source sentence units. Target adjacency is NOT required.
+      - Works even when each moved sentence has internal edits:
+          output one combined 'move' macro row, then internal edits for each sentence
+          in source sentence order.
+      - Merge only when each move macro is a whole sentence on BOTH sides:
+          source_chunk_index matches a source sentence span AND target_chunk_index matches
+          a target sentence span.
+
+    PRESERVE merging (optional):
+      - Merge adjacent 'preserve' rows only when BOTH source_index and target_index are
+        whole-sentence spans and consecutive in BOTH src and tgt.
+      - Never merge partial sentences.
+
+    Assumes Step3 schema columns:
+      operation_id, operation, chunk_label,
+      source_chunk, source_chunk_index, source, source_index,
+      target_chunk, target_chunk_index, target, target_index
+    """
+    if step3_df is None or step3_df.empty:
+        return step3_df
+
+    df = step3_df.copy().reset_index(drop=True)
+
+    needed = {
+        "operation", "chunk_label",
+        "source_chunk", "source_chunk_index", "source", "source_index",
+        "target_chunk", "target_chunk_index", "target", "target_index",
+        "operation_id",
+    }
+    missing = needed - set(df.columns)
+    if missing:
+        raise ValueError(f"Step3 df missing required columns for refinement: {sorted(missing)}")
+
+    src_sid = {sp: i for i, sp in enumerate(src_sentence_spans)}
+    tgt_sid = {sp: i for i, sp in enumerate(tgt_sentence_spans)}
+
+    def is_move_macro(r: Dict[str, Any]) -> bool:
+        return str(r.get("operation")) == "move"
+
+    def is_whole_sentence_move_macro(r: Dict[str, Any]) -> bool:
+        s = _tspan(r.get("source_chunk_index"))
+        t = _tspan(r.get("target_chunk_index"))
+        return (s in src_sid) and (t in tgt_sid)
+
+    def collect_move_edits(macro_idx: int) -> Tuple[List[Dict[str, Any]], int]:
+        """
+        Collect rows immediately following a move macro that belong to that SAME sentence move.
+        Identify by matching chunk_label + source_chunk_index + target_chunk_index.
+        Stop at next move macro or context change.
+        """
+        macro = df.iloc[macro_idx].to_dict()
+        cl = macro.get("chunk_label")
+        sci = _tspan(macro.get("source_chunk_index"))
+        tci = _tspan(macro.get("target_chunk_index"))
+
+        edits: List[Dict[str, Any]] = []
+        j = macro_idx + 1
+        while j < len(df):
+            rj = df.iloc[j].to_dict()
+            if is_move_macro(rj):
+                break
+            if rj.get("chunk_label") != cl:
+                break
+            if _tspan(rj.get("source_chunk_index")) != sci:
+                break
+            if _tspan(rj.get("target_chunk_index")) != tci:
+                break
+            edits.append(rj)
+            j += 1
+        return edits, j
+
+    out: List[Dict[str, Any]] = []
+    i = 0
+
+    # ---- Pass A: merge MOVE macro runs (adjacent in SOURCE only) ----
+    while i < len(df):
+        r = df.iloc[i].to_dict()
+        if not is_move_macro(r):
+            out.append(r)
+            i += 1
+            continue
+
+        # Not a whole sentence move -> keep as-is (+ its edits)
+        if not is_whole_sentence_move_macro(r):
+            out.append(r)
+            edits, nxt = collect_move_edits(i)
+            out.extend(edits)
+            i = nxt
+            continue
+
+        # Start a run of source-adjacent sentence move macros
+        run_macros = [r]
+        run_edits: List[List[Dict[str, Any]]] = []
+
+        e0, nxt0 = collect_move_edits(i)
+        run_edits.append(e0)
+
+        prev_src = src_sid[_tspan(r["source_chunk_index"])]
+
+        j = nxt0
+        while j < len(df) and is_move_macro(df.iloc[j].to_dict()):
+            r2 = df.iloc[j].to_dict()
+            if not is_whole_sentence_move_macro(r2):
+                break
+            s2 = _tspan(r2["source_chunk_index"])
+            src2 = src_sid[s2]
+            if src2 != prev_src + 1:
+                break
+
+            run_macros.append(r2)
+            e2, nxt2 = collect_move_edits(j)
+            run_edits.append(e2)
+
+            prev_src = src2
+            j = nxt2
+
+        if len(run_macros) == 1:
+            out.append(run_macros[0])
+            out.extend(run_edits[0])
+            i = j
+            continue
+
+        # ---- Create combined move macro row ----
+        first, last = run_macros[0], run_macros[-1]
+
+        src_start = _tspan(first["source_chunk_index"])[0]
+        src_end = _tspan(last["source_chunk_index"])[1]
+
+        # Target adjacency not required -> summarize target span as covering range
+        tgt_starts = [_tspan(m["target_chunk_index"])[0] for m in run_macros]
+        tgt_ends = [_tspan(m["target_chunk_index"])[1] for m in run_macros]
+        tgt_start = min(tgt_starts)
+        tgt_end_obs = max(tgt_ends)
+
+        combined_source_chunk = "".join([m.get("source_chunk") or "" for m in run_macros])
+        combined_target_chunk = "".join([m.get("target_chunk") or "" for m in run_macros])
+
+        # Pure relocation macro: target text equals source text
+        combined_source = combined_source_chunk
+        combined_target = combined_source_chunk
+
+        # Normalized move target span: anchored at tgt_start, length from combined_source
+        norm_tgt_end = tgt_start + max(len(combined_source), 1) - 1
+
+        labels = [m.get("chunk_label") for m in run_macros]
+        combined_label = labels[0] if all(l == labels[0] for l in labels) else f"{labels[0]}-{labels[-1]}"
+
+        combined = dict(first)
+        combined.update({
+            "operation": "move",
+            "chunk_label": combined_label,
+
+            "source_chunk": combined_source_chunk,
+            "source_chunk_index": [src_start, src_end],
+            "source": combined_source,
+            "source_index": [src_start, src_end],
+
+            "target_chunk": combined_target_chunk,
+            "target_chunk_index": [tgt_start, tgt_end_obs],
+
+            "target": combined_target,
+            "target_index": [tgt_start, norm_tgt_end],
+        })
+
+        out.append(combined)
+
+        # Append internal edits sentence-by-sentence in source order
+        for edits in run_edits:
+            out.extend(edits)
+
+        i = j
+
+    merged = pd.DataFrame(out, columns=df.columns).reset_index(drop=True)
+    merged["operation_id"] = list(range(1, len(merged) + 1))
+
+    if not merge_preserve:
+        return merged
+
+    # ---- Pass B: merge sentence-level PRESERVES (adjacent in BOTH src+tgt) ----
+    out2: List[Dict[str, Any]] = []
+    k = 0
+    merged = merged.reset_index(drop=True)
+
+    while k < len(merged):
+        r = merged.iloc[k].to_dict()
+        if str(r.get("operation")) != "preserve":
+            out2.append(r)
+            k += 1
+            continue
+
+        s = _tspan(r.get("source_index"))
+        t = _tspan(r.get("target_index"))
+        if (s not in src_sid) or (t not in tgt_sid):
+            out2.append(r)
+            k += 1
+            continue
+
+        cl = r.get("chunk_label")
+        prev_s = src_sid[s]
+        prev_t = tgt_sid[t]
+        run = [r]
+
+        k2 = k + 1
+        while k2 < len(merged):
+            r2 = merged.iloc[k2].to_dict()
+            if str(r2.get("operation")) != "preserve":
+                break
+            if r2.get("chunk_label") != cl:
+                break
+            s2 = _tspan(r2.get("source_index"))
+            t2 = _tspan(r2.get("target_index"))
+            if (s2 not in src_sid) or (t2 not in tgt_sid):
+                break
+            if src_sid[s2] != prev_s + 1:
+                break
+            if tgt_sid[t2] != prev_t + 1:
+                break
+            run.append(r2)
+            prev_s = src_sid[s2]
+            prev_t = tgt_sid[t2]
+            k2 += 1
+
+        if len(run) == 1:
+            out2.append(run[0])
+            k += 1
+            continue
+
+        first, last = run[0], run[-1]
+        s_start = _tspan(first["source_index"])[0]
+        s_end = _tspan(last["source_index"])[1]
+        t_start = _tspan(first["target_index"])[0]
+        t_end = _tspan(last["target_index"])[1]
+
+        merged_preserve = dict(first)
+        merged_preserve.update({
+            "source": "".join([rr.get("source") or "" for rr in run]),
+            "source_index": [s_start, s_end],
+            "target": "".join([rr.get("target") or "" for rr in run]),
+            "target_index": [t_start, t_end],
+        })
+
+        out2.append(merged_preserve)
+        k = k2
+
+    final_df = pd.DataFrame(out2, columns=merged.columns).reset_index(drop=True)
+    final_df["operation_id"] = list(range(1, len(final_df) + 1))
+    return final_df
