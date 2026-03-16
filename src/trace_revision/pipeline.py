@@ -6,8 +6,7 @@ import pandas as pd
 from .step1_chunk_matching import step1_chunk_matching_to_dataframes, build_spacy_nlp
 from .step2_chunk_level_operations import step2_build_operations_dataframe
 from .step3_token_level_analysis import step3_fine_grained_revision_analysis
-from .step1_chunk_matching import sentence_tokenize_with_short_merge
-from .step3_token_level_analysis import refine_step3_merge_adjacent_sentence_units
+from .step3_token_level_analysis import refine_step3_merge_adjacent_chunks_by_label
 
 
 def trace(
@@ -26,7 +25,6 @@ def trace(
     replace_similarity_threshold: float = 0.4,
     # Step3 readability refinement
     refine_sentence_units: bool = True,
-    merge_preserve_sentences: bool = True,
     # Debug
     debug: bool = False,
 ) -> Tuple[pd.DataFrame, List[Dict[str, Any]], Optional[Dict[str, Any]]]:
@@ -59,19 +57,7 @@ def trace(
     )
 
     if refine_sentence_units:
-        # Recompute the SAME sentence units used by Step1 (no Step1 code change needed)
-        src_units = sentence_tokenize_with_short_merge(source_text or "", nlp, min_tokens=min_sent_tokens)
-        tgt_units = sentence_tokenize_with_short_merge(target_text or "", nlp, min_tokens=min_sent_tokens)
-
-        src_spans = [(u.start_char, u.end_char) for u in src_units]
-        tgt_spans = [(u.start_char, u.end_char) for u in tgt_units]
-
-        step3_df = refine_step3_merge_adjacent_sentence_units(
-            step3_df,
-            src_sentence_spans=src_spans,
-            tgt_sentence_spans=tgt_spans,
-            merge_preserve=merge_preserve_sentences,
-        )
+       step3_df = refine_step3_merge_adjacent_chunks_by_label(step3_df)
 
     step3_dict = step3_df.to_dict(orient="records")
 
