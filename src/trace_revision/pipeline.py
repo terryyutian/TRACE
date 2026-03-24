@@ -81,3 +81,25 @@ def trace(
         }
 
     return step3_df, step3_dict, debug_info
+
+
+def _visible_newlines_in_cell(x):
+    """
+    Replace literal newline characters with the visible marker '<newline>'
+    for display/export only. Non-string values are returned unchanged.
+    """
+    if isinstance(x, str):
+        return x.replace("\n", "<newline>")
+    return x
+
+def make_newlines_visible(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return a copy of df where all string cells have '\n' replaced by
+    '<newline>' for easier CSV/display inspection.
+
+    This is a DISPLAY/EXPORT helper only. It does not change analysis spans.
+    """
+    out = df.copy()
+    for col in out.columns:
+        out[col] = out[col].apply(_visible_newlines_in_cell)
+    return out

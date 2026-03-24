@@ -17,6 +17,29 @@ WEB_DIR = APP_DIR / "web"
 app = FastAPI(title="TRACE: Text Revision Analysis via Change Estimation")
 
 
+def _visible_newlines(x: Any) -> Any:
+    """
+    Replace literal newline characters with '<newline>' for display/export only.
+    """
+    if isinstance(x, str):
+        return x.replace("\n", "<newline>")
+    return x
+
+
+def _format_rows_for_display(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Make rows easier to read in the UI/export:
+      - show newline characters as '<newline>'
+    """
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        new_row: Dict[str, Any] = {}
+        for k, v in row.items():
+            new_row[k] = _visible_newlines(v)
+        out.append(new_row)
+    return out
+
+
 class AnalyzeRequest(BaseModel):
     source_text: str
     target_text: str
@@ -72,12 +95,15 @@ def api_analyze(req: AnalyzeRequest) -> JSONResponse:
             df[c] = None
 
     out = df[cols].fillna("").to_dict(orient="records")
+    out = _format_rows_for_display(out)
     return JSONResponse({"rows": out})
 
 
 @app.post("/api/export")
 def api_export(payload: Dict[str, Any]) -> Response:
     rows = payload.get("rows", [])
+    rows = _format_rows_for_display(rows)
+
     df = pd.DataFrame(rows)
     buf = io.StringIO()
     df.to_csv(buf, index=False)

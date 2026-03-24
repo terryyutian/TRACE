@@ -503,8 +503,41 @@ def _cover_span(a: Optional[List[int]], b: Optional[List[int]]) -> Optional[List
 
 
 def _concat_text(parts: List[Optional[str]]) -> str:
-    # preserve original spacing/newlines as much as possible by direct concatenation
-    return "".join([p for p in parts if p is not None])
+    """
+    Concatenate adjacent merged chunk texts more readably.
+
+    Rules:
+      - keep existing whitespace/newlines if already present
+      - do not insert spaces before closing punctuation
+      - do not insert spaces after opening brackets
+      - otherwise insert a single space between adjacent chunks
+
+    This helper is for posthoc readability only.
+    """
+    cleaned = [p for p in parts if isinstance(p, str) and p != ""]
+    if not cleaned:
+        return ""
+
+    out = cleaned[0]
+
+    for cur in cleaned[1:]:
+        if not out:
+            out = cur
+            continue
+
+        prev_last = out[-1]
+        cur_first = cur[0]
+
+        if prev_last.isspace() or cur_first.isspace():
+            out += cur
+        elif cur_first in {".", ",", ";", ":", "!", "?", ")", "]", "}"}:
+            out += cur
+        elif prev_last in {"(", "[", "{"}:
+            out += cur
+        else:
+            out += " " + cur
+
+    return out
 
 
 # ----------------------------

@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Dict, Any, List, Optional
 import pandas as pd
 
-from .general import ensure_span_list, safe_cell
+from .general import ensure_span_list, safe_cell, tokenize_regex
 
 # ============================================================
 # Label helpers
@@ -116,6 +116,16 @@ def _lcs_prefer_later(source_c: List[str], target_c: List[str]) -> List[str]:
 # Post-hoc Replace compaction (Delete -> Insert only)
 # ============================================================
 
+def _has_newline_token(text: Any) -> bool:
+    """
+    True if the text contains at least one newline token under TRACE's tokenizer.
+    """
+    text = safe_cell(text)
+    if text is None:
+        return False
+    return any(tok == "\n" for tok in tokenize_regex(str(text), lowercase=False))
+
+
 def posthoc_compact_replace(op_df: pd.DataFrame) -> pd.DataFrame:
     """
     Replace definition:
@@ -149,8 +159,19 @@ def posthoc_compact_replace(op_df: pd.DataFrame) -> pd.DataFrame:
     i = 0
     while i < len(rows):
         cur = rows[i]
+
         if cur["operation"] == "Delete" and i + 1 < len(rows) and rows[i + 1]["operation"] == "Insert":
             nxt = rows[i + 1]
+
+            # Paragraph-boundary safeguard:
+            # If either side contains a newline token, keep them separate.
+            # This prevents false Replace compaction across paragraph breaks.
+            if _has_newline_token(cur["source_chunk"]) or _has_newline_token(nxt["target_chunk"]):
+                compacted.append(cur)
+                compacted.append(nxt)
+                i += 2
+                continue
+
             compacted.append({
                 "id": None,
                 "operation": "Replace",
@@ -165,7 +186,7 @@ def posthoc_compact_replace(op_df: pd.DataFrame) -> pd.DataFrame:
         else:
             compacted.append(cur)
             i += 1
-
+            
     # ---- 2) Renumber IDs (stable) ----
     for new_id, r in enumerate(compacted, start=1):
         r["id"] = new_id
