@@ -1,3 +1,3 @@
-from .pipeline import trace
+from .pipeline import trace, make_newlines_visible
 
-__all__ = ["trace"]
+__all__ = ["trace", "make_newlines_visible"]
