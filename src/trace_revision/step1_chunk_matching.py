@@ -369,10 +369,45 @@ def _build_unmatched_spans(total: int, covered: set, group: bool) -> List[UnitSp
 # Post-hoc grouping adjacent unmatched rows (Option 1)
 # ============================================================
 
-def group_adjacent_unmatched(df: pd.DataFrame, prefix: str = "D") -> pd.DataFrame:
+def group_adjacent_unmatched(
+    df: pd.DataFrame,
+    prefix: str = "D",
+    original_text: Optional[str] = None,
+) -> pd.DataFrame:
     """
-    Collapse maximal consecutive runs whose label starts with `prefix` (e.g., D*, I*).
-    Keeps FIRST label in run, concatenates chunk text, and merges chunk_index.
+    Collapse maximal consecutive runs whose label starts with `prefix` 
+    (e.g., D* for source deletes, I* for target inserts).
+
+    Keeps the FIRST label in each run, merges chunk_index into one
+    inclusive [start, end] span, and reconstructs chunk text.
+
+    If `original_text` is provided, grouped chunk text is reconstructed
+    by slicing from the original text:
+
+        original_text[start_char:end_char + 1]
+
+    This preserves spaces, tabs, and newlines exactly between grouped chunks.
+
+    If `original_text` is not provided, falls back to concatenating existing
+    chunk strings for backward compatibility.
+
+    Parameters
+    ----------
+    df:
+        DataFrame with columns ["chunk", "label", "chunk_index"].
+
+    prefix:
+        Label prefix to group. Use "D" for source unmatched chunks and
+        "I" for target unmatched chunks.
+
+    original_text:
+        Original source or target text. When provided, grouped chunks are
+        reconstructed from character spans.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with columns ["chunk", "label", "chunk_index"].
     """
     required = {"chunk", "label", "chunk_index"}
     missing = required - set(df.columns)
@@ -383,47 +418,79 @@ def group_adjacent_unmatched(df: pd.DataFrame, prefix: str = "D") -> pd.DataFram
     i = 0
     n = len(df)
 
-    def is_prefix(lbl: Any) -> bool:
-        return isinstance(lbl, str) and lbl.startswith(prefix)
+    def is_prefix(label: Any) -> bool:
+        return isinstance(label, str) and label.startswith(prefix)
+
+    def slice_original(start: int, end: int) -> str:
+        if original_text is None:
+            raise ValueError("original_text is required for slicing.")
+        if start < 0 or end < start:
+            raise ValueError(f"Invalid span for slicing: [{start}, {end}]")
+        if end >= len(original_text):
+            raise ValueError(
+                f"Span [{start}, {end}] is outside original_text length "
+                f"{len(original_text)}."
+            )
+        return original_text[start:end + 1]
 
     while i < n:
         row = df.iloc[i]
-        lbl = row["label"]
+        label = row["label"]
 
-        if not is_prefix(lbl):
-            rows.append({
-                "chunk": row["chunk"],
-                "label": row["label"],
-                "chunk_index": ensure_span_list(row["chunk_index"]),
-            })
+        if not is_prefix(label):
+            rows.append(
+                {
+                    "chunk": row["chunk"],
+                    "label": row["label"],
+                    "chunk_index": ensure_span_list(row["chunk_index"]),
+                }
+            )
             i += 1
             continue
 
         run_label = row["label"]
-        idx0 = ensure_span_list(row["chunk_index"])
-        if idx0 is None:
+        first_span = ensure_span_list(row["chunk_index"])
+        if first_span is None:
             raise ValueError(f"Invalid chunk_index at row {i}: {row['chunk_index']!r}")
-        start_char, end_char = idx0[0], idx0[1]
 
-        chunk_parts = [str(row["chunk"])]
+        start_char = int(first_span[0])
+        end_char = int(first_span[1])
+
+        chunk_parts = [str(row["chunk"]) if row["chunk"] is not None else ""]
         i += 1
 
         while i < n and is_prefix(df.iloc[i]["label"]):
-            r = df.iloc[i]
-            chunk_parts.append(str(r["chunk"]))
-            idx = ensure_span_list(r["chunk_index"])
-            if idx is None:
-                raise ValueError(f"Invalid chunk_index at row {i}: {r['chunk_index']!r}")
-            end_char = idx[1]
+            current_row = df.iloc[i]
+            current_span = ensure_span_list(current_row["chunk_index"])
+            if current_span is None:
+                raise ValueError(
+                    f"Invalid chunk_index at row {i}: "
+                    f"{current_row['chunk_index']!r}"
+                )
+
+            end_char = int(current_span[1])
+            chunk_parts.append(
+                str(current_row["chunk"]) if current_row["chunk"] is not None else ""
+            )
             i += 1
 
-        rows.append({
-            "chunk": "".join([p for p in chunk_parts if p]),
-            "label": run_label,
-            "chunk_index": [int(start_char), int(end_char)],
-        })
+        if original_text is not None:
+            merged_chunk = slice_original(start_char, end_char)
+        else:
+            merged_chunk = "".join(chunk_parts)
 
-    return pd.DataFrame(rows, columns=["chunk", "label", "chunk_index"]).reset_index(drop=True)
+        rows.append(
+            {
+                "chunk": merged_chunk,
+                "label": run_label,
+                "chunk_index": [start_char, end_char],
+            }
+        )
+
+    return pd.DataFrame(
+        rows,
+        columns=["chunk", "label", "chunk_index"],
+    ).reset_index(drop=True)
 
 
 # ============================================================
@@ -570,8 +637,16 @@ def step1_chunk_matching_to_dataframes(
 
     # Post-hoc grouping adjacent unmatched rows (Option 1)
     if group_adjacent_unmatched_posthoc:
-        src_df = group_adjacent_unmatched(src_df, prefix="D")
-        tgt_df = group_adjacent_unmatched(tgt_df, prefix="I")
+        src_df = group_adjacent_unmatched(
+            src_df,
+            prefix="D",
+            original_text=src_text,
+        )
+        tgt_df = group_adjacent_unmatched(
+            tgt_df,
+            prefix="I",
+            original_text=tgt_text,
+        )
 
     # Enforce span list format at the end (defensive)
     src_df["chunk_index"] = src_df["chunk_index"].apply(ensure_span_list)
