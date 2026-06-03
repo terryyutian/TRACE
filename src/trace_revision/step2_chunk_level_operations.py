@@ -133,7 +133,7 @@ def posthoc_compact_replace(op_df: pd.DataFrame) -> pd.DataFrame:
       - No other operations in between
       - Do NOT treat Insert->Delete as Replace
 
-    Label policy (NEW):
+    Label policy:
       - Replace rows are relabeled as R1, R2, ... (set on BOTH source_label and target_label)
       - Remaining Delete rows are relabeled D1, D2, ...
       - Remaining Insert rows are relabeled I1, I2, ...
@@ -163,14 +163,14 @@ def posthoc_compact_replace(op_df: pd.DataFrame) -> pd.DataFrame:
         if cur["operation"] == "Delete" and i + 1 < len(rows) and rows[i + 1]["operation"] == "Insert":
             nxt = rows[i + 1]
 
-            # Paragraph-boundary safeguard:
-            # If either side contains a newline token, keep them separate.
-            # This prevents false Replace compaction across paragraph breaks.
-            if _has_newline_token(cur["source_chunk"]) or _has_newline_token(nxt["target_chunk"]):
-                compacted.append(cur)
-                compacted.append(nxt)
-                i += 2
-                continue
+            # # Paragraph-boundary safeguard:
+            # # If either side contains a newline token, keep them separate.
+            # # This prevents false Replace compaction across paragraph breaks.
+            # if _has_newline_token(cur["source_chunk"]) or _has_newline_token(nxt["target_chunk"]):
+                # compacted.append(cur)
+                # compacted.append(nxt)
+                # i += 2
+                # continue
 
             compacted.append({
                 "id": None,
