@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass
 from typing import Any, List, Optional
@@ -205,3 +206,23 @@ def add_span_base(local_span: Optional[List[int]], base_start: Optional[int]) ->
     if local_span is None or base_start is None:
         return None
     return [base_start + local_span[0], base_start + local_span[1]]
+
+### More general functions 
+
+def get_files_in_directory(directory_path: str) -> List[str]:
+    """
+    Get all file paths in the specified directory and return them as a list of strings.
+
+    :param directory_path: The path to the directory to search for files.
+    :return: A list of file paths as strings.
+    """
+    file_list = []
+
+    # Walk through the directory
+    for root, _, files in os.walk(directory_path):
+        for file in files:
+            # Construct the full file path
+            file_path = os.path.join(root, file)
+            file_list.append(file_path)
+
+    return file_list
